@@ -96,16 +96,16 @@ nb_wf <- workflow() %>%
 ## Tune smoothness and Laplace here
 
 ## Grid of values to tune over
-tuning_grid <- grid_regular(smoothness(),
+tuning_grid <- grid_regular(smoothness(range=c(1.3,1.7)),
                             Laplace(),
-                            levels = 5) ## L^2 total tuning possibilities
+                            levels = 10) ## L^2 total tuning possibilities
 
 ## Split data for CV15
 ## Split data for CV15
-folds <- vfold_cv(GGGtrain, v = 5, repeats=1)
+folds <- vfold_cv(GGGtrain, v = 10, repeats=1)
 
 ## Run the CV
-CV_results <- wf_RF %>%
+CV_results <- nb_wf %>%
   tune_grid(resamples=folds,
             grid=tuning_grid,
             metrics=metric_set(accuracy)) #Or leave metrics NULL
@@ -195,8 +195,63 @@ submission <- GGG_prediction_nn %>%
 
 vroom_write(submission, "GGGnn.csv", delim = ",")
 
+###############################################################################
+# Boosting and BART
 
+my_recipe_B <- recipe(type ~ ., data = GGGtrain)%>%
+  step_lencode_glm(color, outcome = vars(type))
 
+library(bonsai)
+library(lightgbm)
+boost_model <- boost_tree(tree_depth=tune(),
+                          trees=tune(),
+                          learn_rate=tune()) %>%
+set_engine("lightgbm") %>% #or "xgboost" but lightgbm is faster
+  set_mode("classification")
 
+bart_model <- bart(trees=tune()) %>% # BART figures out depth and learn_rate
+  set_engine("dbarts") %>% # might need to install
+  set_mode("classification")
 
+B_wf <- workflow() %>%
+  add_recipe(my_recipe_B) %>%
+  add_model(bart_model)
 
+Boost_wf <- workflow() %>%
+  add_recipe(my_recipe_B) %>%
+  add_model(boost_model)
+
+## CV tune, finalize and predict here and save results
+## Grid of values to tune over
+tuning_grid <- grid_regular(tree_depth(),
+                            trees(),
+                            learn_rate(),
+                            levels = 3) ## L^2 total tuning possibilities
+
+## Split data for CV15
+## Split data for CV15
+folds <- vfold_cv(GGGtrain, v = 5, repeats=1)
+
+## Run the CV
+CV_results <- Boost_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(accuracy)) #Or leave metrics NULL
+
+#Find the best tuning parameters
+bestTune <- CV_results %>%
+  select_best('accuracy')
+
+final_wf <- Boost_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=GGGtrain)
+
+## Predict
+GGG_prediction_B <- final_wf %>% predict(new_data = GGGtest, type="class")
+
+submission <- GGG_prediction_B %>%
+  mutate(id = GGGtest$id) %>%
+  mutate(type = .pred_class) %>%
+  select(2, 3)
+
+vroom_write(submission, "GGGB.csv", delim = ",")
